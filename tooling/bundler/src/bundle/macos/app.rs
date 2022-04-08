@@ -69,7 +69,7 @@ pub fn bundle_project(settings: &Settings) -> crate::Result<Vec<PathBuf>> {
   create_info_plist(&bundle_directory, bundle_icon_file, settings)
     .with_context(|| "Failed to create Info.plist")?;
 
-  copy_frameworks_to_bundle(&bundle_directory, settings)
+  let copied_frameworks = copy_frameworks_to_bundle(&bundle_directory, settings)
     .with_context(|| "Failed to bundle frameworks")?;
 
   settings.copy_resources(&resources_dir)?;
@@ -80,10 +80,8 @@ pub fn bundle_project(settings: &Settings) -> crate::Result<Vec<PathBuf>> {
 
   copy_binaries_to_bundle(&bundle_directory, settings)?;
 
-  let use_bootstrapper = settings.macos().use_bootstrapper.unwrap_or_default();
-  if use_bootstrapper {
-    create_bootstrapper(&bundle_directory, settings)
-      .with_context(|| "Failed to create macOS bootstrapper")?;
+  if copied_frameworks.is_some() {
+    add_frameworks_to_rpath(&bundle_directory, settings)?;
   }
 
   if let Some(identity) = &settings.macos().signing_identity {
@@ -104,6 +102,30 @@ pub fn bundle_project(settings: &Settings) -> crate::Result<Vec<PathBuf>> {
   }
 
   Ok(vec![app_bundle_path])
+}
+
+// Add the @rpath to the binaries so that it can find the frameworks in the bundle
+fn add_frameworks_to_rpath(bundle_directory: &Path, settings: &Settings) -> crate::Result<()> {
+  let binary_dir = bundle_directory.join("MacOS");
+  for bin in settings.binaries() {
+    let bin = binary_dir.join(bin.name());
+
+    let add_rpath = Command::new("install_name_tool")
+      .args(vec![
+        "-add_rpath",
+        "@executable_path/../Frameworks",
+        bin
+          .to_str()
+          .ok_or_else(|| anyhow::anyhow!("failed to convert bin name to str"))?,
+      ])
+      .stderr(Stdio::inherit())
+      .status()?;
+
+    if !add_rpath.success() {
+      return Err(anyhow::anyhow!("failed to add rpath for frameworks").into());
+    }
+  }
+  Ok(())
 }
 
 // Copies the app's binaries to the bundle.
@@ -339,7 +361,10 @@ fn copy_framework_from(dest_dir: &Path, framework: &str, src_dir: &Path) -> crat
 }
 
 // Copies the macOS application bundle frameworks to the .app
-fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> crate::Result<()> {
+fn copy_frameworks_to_bundle(
+  bundle_directory: &Path,
+  settings: &Settings,
+) -> crate::Result<Option<Vec<String>>> {
   let frameworks = settings
     .macos()
     .frameworks
@@ -347,8 +372,9 @@ fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> cr
     .cloned()
     .unwrap_or_default();
   if frameworks.is_empty() {
-    return Ok(());
+    return Ok(None);
   }
+  let mut copied = vec![];
   let dest_dir = bundle_directory.join("Frameworks");
   fs::create_dir_all(&bundle_directory)
     .with_context(|| format!("Failed to create Frameworks directory at {:?}", dest_dir))?;
@@ -359,6 +385,7 @@ fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> cr
         .file_name()
         .expect("Couldn't get framework filename");
       common::copy_dir(&src_path, &dest_dir.join(&src_name))?;
+      copied.push(framework.to_string());
       continue;
     } else if framework.contains('/') {
       return Err(crate::Error::GenericError(format!(
@@ -368,6 +395,7 @@ fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> cr
     }
     if let Some(home_dir) = dirs_next::home_dir() {
       if copy_framework_from(&dest_dir, framework, &home_dir.join("Library/Frameworks/"))? {
+        copied.push(framework.to_string());
         continue;
       }
     }
@@ -378,6 +406,7 @@ fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> cr
         &PathBuf::from("/Network/Library/Frameworks/"),
       )?
     {
+      copied.push(framework.to_string());
       continue;
     }
     return Err(crate::Error::GenericError(format!(
@@ -385,5 +414,9 @@ fn copy_frameworks_to_bundle(bundle_directory: &Path, settings: &Settings) -> cr
       framework
     )));
   }
-  Ok(())
+  if copied.is_empty() {
+    Ok(None)
+  } else {
+    Ok(Some(copied))
+  }
 }
