@@ -21,6 +21,11 @@
         "wix": {
           "skipWebviewInstall": true
         }
+      },
+      "macOS": {
+        "frameworks": [
+          "./frameworks/test.framework"
+        ]
       }
     },
     "allowlist": {
