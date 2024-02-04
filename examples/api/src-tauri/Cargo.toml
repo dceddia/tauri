@@ -1,5 +1,5 @@
 [package]
-name = "api"
+name = "basic_api_example"
 version = "0.1.0"
 description = "An example Tauri Application showcasing the api"
 edition = "2021"
